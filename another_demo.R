@@ -1,9 +1,9 @@
 # ============================================================
-# 🌍 LAND USE ANOMALY PIPELINE — PRODUCTION READY
+# 🌍 LAND USE ANOMALY PIPELINE — PRODUCTION READY + SEARCH + CSV EXPORT
 # ============================================================
 
 # ------------------------------------------------------------
-# 1️⃣  LIBRARIES & SETTINGS
+# 1) LIBRARIES & SETTINGS
 # ------------------------------------------------------------
 library(rgee)
 library(sf)
@@ -17,41 +17,41 @@ library(tidygeocoder)
 library(mapview)
 library(DT)
 library(htmlwidgets)
-
-
-
-# ============================================================
-# SAFE POPUP HELPER (replaces mapview::popupTable)
-# ============================================================
-popupTableSafe <- function(sf_obj, zcol = NULL) {
-  # Drop geometry
-  df <- sf::st_drop_geometry(sf_obj)
-  if (is.null(zcol)) zcol <- names(df)
-  df <- df[, zcol, drop = FALSE]
-  
-  # Escape HTML
-  df[] <- lapply(df, function(x) htmltools::htmlEscape(as.character(x)))
-  
-  # Build popup content per feature
-  popups <- apply(df, 1, function(row) {
-    paste0("<table style='font-size:12px;'>",
-           paste0("<tr><td><b>", names(row), ":</b></td><td>", row, "</td></tr>",
-                  collapse = ""),
-           "</table>")
-  })
-  return(popups)
-}
-
-
-
-
-
+library(htmltools)
+library(webshot)
+library(leaflet.extras)   # 🔍 for search box
 
 demo_mode <- TRUE
-mapviewOptions(fgb = FALSE)  # ensures Leaflet rendering for wide compatibility
+mapviewOptions(fgb = FALSE)
+options(mapview.popup = "html")
 
 # ------------------------------------------------------------
-# 2️⃣  PYTHON + EARTH ENGINE AUTHENTICATION
+# SAFE POPUP HELPER
+# ------------------------------------------------------------
+popupTableSafe <- function(sf_obj, zcol = NULL) {
+  df <- sf::st_drop_geometry(sf_obj)
+  if (is.null(zcol)) zcol <- names(df)
+  zcol <- intersect(zcol, names(df))
+  if (!length(zcol)) return(rep("<i>No attributes</i>", nrow(df)))
+  df <- df[, zcol, drop = FALSE]
+  df[] <- lapply(df, function(x) htmltools::htmlEscape(as.character(x)))
+  vapply(
+    seq_len(nrow(df)),
+    function(i) {
+      row <- df[i, , drop = TRUE]
+      paste0(
+        "<table style='font-size:12px;'>",
+        paste0("<tr><td><b>", names(row), ":</b></td>",
+               "<td style='padding-left:6px;'>", unname(row), "</td></tr>", collapse = ""),
+        "</table>"
+      )
+    },
+    character(1)
+  )
+}
+
+# ------------------------------------------------------------
+# 2) PYTHON + EARTH ENGINE AUTH
 # ------------------------------------------------------------
 reticulate::use_python("/home/omuka/miniconda3/envs/rgee_env/bin/python", required = TRUE)
 
@@ -60,7 +60,7 @@ ensure_ee_auth <- function(email, project) {
     ee_Initialize(email = email, drive = TRUE, gcs = FALSE, project = project, quiet = TRUE)
     message("✅ EE initialized successfully.")
   }, error = function(e) {
-    message("⚠️  Re-authenticating Google Earth Engine...")
+    message("⚠️ Re-authenticating Google Earth Engine...")
     ee_clean_user_credentials()
     googledrive::drive_deauth()
     unlink("~/.config/earthengine", recursive = TRUE, force = TRUE)
@@ -72,21 +72,28 @@ ensure_ee_auth <- function(email, project) {
 }
 
 ensure_ee_auth(
-  email = "sds6488292025@students.uonbi.ac.ke",
+  email   = "sds6488292025@students.uonbi.ac.ke",
   project = "ee-sds6488292025"
 )
 
 # ------------------------------------------------------------
-# 3️⃣  LOAD PLANNING ZONES
+# 3) LOAD PLANNING ZONES
 # ------------------------------------------------------------
-zones <- st_read("data/national_plan_zones.gpkg") %>%
+zones_path <- "data/national_plan_zone_c.gpkg"
+if (!file.exists(zones_path)) stop("Input not found: ", zones_path)
+
+zones <- st_read(zones_path, quiet = TRUE) %>%
   st_make_valid() %>%
   st_transform(4326)
+
+if (!("zone_type" %in% names(zones))) {
+  stop("The zones layer must contain a 'zone_type' column.")
+}
 
 zones_ee <- sf_as_ee(zones)
 
 # ------------------------------------------------------------
-# 4️⃣  GET DYNAMIC WORLD DATA
+# 4) GET DYNAMIC WORLD DATA (2024 median)
 # ------------------------------------------------------------
 dw <- ee$ImageCollection("GOOGLE/DYNAMICWORLD/V1")$
   filterDate("2024-01-01", "2024-12-31")$
@@ -104,26 +111,24 @@ zonal_stats <- dw$reduceRegions(
 zonal_sf <- ee_as_sf(zonal_stats, maxFeatures = 10000)
 
 # ------------------------------------------------------------
-# 5️⃣  STANDARDIZE MODE COLUMN NAME
+# 5) STANDARDIZE MODE COLUMN NAME
 # ------------------------------------------------------------
 pick_mode_col <- function(nm) {
   cands <- c("mode", ".mode", "label_mode", "label")
   m <- intersect(cands, nm)
-  if (length(m) == 0) stop("Couldn't find mode column in EE output. Found: ", paste(nm, collapse = ", "))
+  if (length(m) == 0) stop("Couldn't find a mode column in EE output. Found: ", paste(nm, collapse = ", "))
   m[1]
 }
 mode_col <- pick_mode_col(names(zonal_sf))
-
-zonal_sf <- zonal_sf %>%
-  rename(mode = !!rlang::sym(mode_col))
+zonal_sf <- zonal_sf %>% rename(mode = !!rlang::sym(mode_col))
 
 # ------------------------------------------------------------
-# 6️⃣  CLASS LABELS & ANOMALY LOGIC
+# 6) CLASS LABELS & ANOMALY LOGIC
 # ------------------------------------------------------------
 classes <- tibble(
   id = 0:8,
-  class = c("Water", "Trees", "Grass", "Flooded Vegetation",
-            "Crops", "Shrub & Scrub", "Built Area", "Bare Ground", "Snow/Ice")
+  class = c("Water","Trees","Grass","Flooded Vegetation",
+            "Crops","Shrub & Scrub","Built Area","Bare Ground","Snow/Ice")
 )
 
 zonal_sf <- zonal_sf %>%
@@ -131,118 +136,91 @@ zonal_sf <- zonal_sf %>%
   rename(observed_class = class)
 
 allowed_map <- tibble(
-  zone_type = c("URBAN", "AGRICULTURAL", "FOREST", "WETLAND", "INDUSTRIAL"),
-  allowed_class = c("Built Area", "Crops", "Trees", "Flooded Vegetation", "Built Area")
+  zone_type = c("URBAN","AGRICULTURAL","FOREST","WETLAND","INDUSTRIAL"),
+  allowed_class = c("Built Area","Crops","Trees","Flooded Vegetation","Built Area")
 )
 
-before_n_na <- sum(is.na(zonal_sf$zone_type))
 zonal_sf <- zonal_sf %>% left_join(allowed_map, by = "zone_type")
-after_n_na <- sum(is.na(zonal_sf$allowed_class))
-if (after_n_na > 0) {
-  warn_levels <- setdiff(unique(zonal_sf$zone_type), allowed_map$zone_type)
-  message("⚠️  ", after_n_na, " zones not matched in allowed_map. Missing: ", paste(warn_levels, collapse = ", "))
+
+missing_mask <- is.na(zonal_sf$allowed_class)
+if (any(missing_mask, na.rm = TRUE)) {
+  missing_types <- sort(unique(zonal_sf$zone_type[missing_mask]))
+  message("⚠️  ", sum(missing_mask, na.rm = TRUE),
+          " features lack 'allowed_class'. Unmapped zone_type values: ",
+          paste(missing_types, collapse = ", "))
 }
 
 zonal_sf <- zonal_sf %>%
   mutate(anomaly = ifelse(is.na(allowed_class), NA, observed_class != allowed_class))
 
 # ------------------------------------------------------------
-# 7️⃣  GEOMETRY CENTROIDS + REVERSE GEOCODING
+# 7) CENTROIDS & REVERSE GEOCODING
 # ------------------------------------------------------------
-zonal_sf <- zonal_sf %>%
-  mutate(
-    centroid = st_centroid(geometry),
-    lon = st_coordinates(centroid)[, 1],
-    lat = st_coordinates(centroid)[, 2]
-  )
+if (!all(c("lon","lat") %in% names(zonal_sf))) {
+  zonal_sf <- zonal_sf %>%
+    mutate(
+      centroid = st_centroid(geometry),
+      lon = st_coordinates(centroid)[,1],
+      lat = st_coordinates(centroid)[,2]
+    )
+}
 
-anomalies_sf <- zonal_sf %>% filter(anomaly == TRUE)
+anomalies_sf <- zonal_sf %>% filter(isTRUE(anomaly))
 
 if (nrow(anomalies_sf) == 0) {
   message("✅ No real anomalies – skipping geocoding.")
   anomalies_geocoded <- anomalies_sf %>% mutate(address = "No anomalies")
 } else {
   message("📍 Reverse-geocoding ", nrow(anomalies_sf), " anomalies...")
-  if (nrow(anomalies_sf) > 50) message("Heads-up: many points; geocoding may take a while.")
-  anomalies_geocoded <- tryCatch({
-    tidygeocoder::reverse_geocode(anomalies_sf,
-                                  lat = lat, long = lon,
-                                  method = "osm",
-                                  address = address,
-                                  full_results = FALSE)
+  coords_df <- anomalies_sf %>%
+    st_drop_geometry() %>%
+    select(zone_type, observed_class, allowed_class, lon, lat)
+  
+  geocoded_df <- tryCatch({
+    tidygeocoder::reverse_geocode(
+      data        = coords_df,
+      lat         = lat,
+      long        = lon,
+      method      = "osm",
+      address     = address,
+      full_results = FALSE
+    )
   }, error = function(e) {
     message("⚠️  Geocoding failed: ", e$message)
-    anomalies_sf %>% mutate(address = NA_character_)
+    coords_df %>% mutate(address = NA_character_)
   })
-  if (!"address" %in% names(anomalies_geocoded))
-    anomalies_geocoded$address <- NA_character_
+  
+  if ("long" %in% names(geocoded_df) && !("lon" %in% names(geocoded_df))) {
+    geocoded_df <- geocoded_df %>% rename(lon = long)
+  }
+  if (!all(c("lon","lat") %in% names(geocoded_df))) {
+    stop("Reverse geocoding output missing lon/lat columns.")
+  }
+  if (!("address" %in% names(geocoded_df))) {
+    geocoded_df$address <- NA_character_
+  }
+  
+  anomalies_geocoded <- sf::st_as_sf(geocoded_df, coords = c("lon","lat"), crs = 4326)
 }
 
 zonal_sf <- zonal_sf %>%
-  left_join(anomalies_geocoded %>% st_drop_geometry() %>% select(lon, lat, address),
-            by = c("lon", "lat"))
-
-
-
-
-# ---------------------------------------------------------
-# ✅ SAFE REVERSE GEOCODING BLOCK (FINAL FIX)
-# ---------------------------------------------------------
-
-anomalies_geocoded <- tryCatch({
-  # Make sure lon/lat columns exist before geocoding
-  if (!("lon" %in% names(anomalies_sf)) || !("lat" %in% names(anomalies_sf))) {
-    anomalies_sf <- anomalies_sf %>%
-      mutate(
-        centroid = st_centroid(geometry),
-        lon = st_coordinates(centroid)[, 1],
-        lat = st_coordinates(centroid)[, 2]
-      )
-  }
-  
-  # Drop geometry before geocoding
-  coords_df <- anomalies_sf %>% st_drop_geometry()
-  
-  # Run reverse geocoding (Nominatim)
-  geocoded_df <- tidygeocoder::reverse_geocode(
-    coords_df,
-    lat = lat,
-    long = lon,
-    method = "osm",
-    address = address,
-    full_results = FALSE
+  left_join(
+    anomalies_geocoded %>% st_drop_geometry() %>% select(lon, lat, address),
+    by = c("lon","lat")
   )
-  
-  # Rename if tidygeocoder renamed 'long' → 'lon'
-  if ("long" %in% names(geocoded_df) && !"lon" %in% names(geocoded_df)) {
-    geocoded_df <- geocoded_df %>%
-      rename(lon = long)
-  }
-  
-  # Reattach geometry
-  sf::st_as_sf(geocoded_df, coords = c("lon", "lat"), crs = 4326)
-  
-}, error = function(e) {
-  message("⚠️  Reverse geocoding failed: ", e$message)
-  anomalies_sf %>% mutate(address = NA_character_)
-})
-
-
-
-
 
 # ------------------------------------------------------------
-# 8️⃣  PLANNER-FRIENDLY TABLE
+# 8) PLANNER-FRIENDLY TABLE
 # ------------------------------------------------------------
 planner_table <- anomalies_geocoded %>%
   st_drop_geometry() %>%
   select(
-    Zone = zone_type,
-    `Observed Class` = observed_class,
+    Zone            = zone_type,
+    `Observed Class`= observed_class,
     `Allowed Class` = allowed_class,
-    Longitude = lon,
-    Latitude = lat,
-    Address = address
+    Longitude       = lon,
+    Latitude        = lat,
+    Address         = address
   ) %>%
   mutate(
     `Google Maps Link` = paste0(
@@ -252,14 +230,14 @@ planner_table <- anomalies_geocoded %>%
   )
 
 # ------------------------------------------------------------
-# 9️⃣  INTERACTIVE MAP (Leaflet via mapview)
+# 9) INTERACTIVE MAP
 # ------------------------------------------------------------
 base_map <- mapview(
   zones,
   zcol = "zone_type",
   alpha.regions = 0.25,
   layer.name = "Planning Zones",
-  map.types = c("OpenStreetMap", "Esri.WorldImagery")
+  map.types = c("OpenStreetMap","Esri.WorldImagery")
 )
 
 if (nrow(anomalies_geocoded) > 0) {
@@ -269,11 +247,9 @@ if (nrow(anomalies_geocoded) > 0) {
     col.regions = "red",
     cex = 7,
     layer.name = "Anomalies (2024)",
-    popup = mapview::popupTable(
+    popup = popupTableSafe(
       anomalies_geocoded,
-      zcol = c("zone_type","observed_class","allowed_class","address","lon","lat"),
-      feature.id = FALSE,
-      row.numbers = FALSE
+      zcol = c("zone_type","observed_class","allowed_class","address","lon","lat")
     )
   )
   combined_map <- base_map + anom_map
@@ -285,19 +261,19 @@ if (nrow(anomalies_geocoded) > 0) {
 }
 
 # ------------------------------------------------------------
-# 🔟  DEMO MODE (Optional)
+# 10) DEMO MODE
 # ------------------------------------------------------------
 if (isTRUE(demo_mode)) {
   demo_pts <- st_as_sf(
     data.frame(
-      zone_type = c("URBAN", "AGRICULTURAL", "FOREST", "WETLAND", "INDUSTRIAL"),
-      observed_class = c("Crops", "Built Area", "Bare Ground", "Crops", "Trees"),
-      allowed_class = c("Built Area", "Crops", "Trees", "Flooded Vegetation", "Built Area"),
-      lon = c(36.8219, 36.7892, 37.0010, 36.9055, 36.8452),
-      lat = c(-1.2921, -1.3051, -0.9965, -1.2341, -1.3102),
-      address = c("Nairobi", "Kilimani", "Thika", "Athi River", "Donholm")
+      zone_type      = c("URBAN","AGRICULTURAL","FOREST","WETLAND","INDUSTRIAL"),
+      observed_class = c("Crops","Built Area","Bare Ground","Crops","Trees"),
+      allowed_class  = c("Built Area","Crops","Trees","Flooded Vegetation","Built Area"),
+      lon            = c(36.8219,36.7892,37.0010,36.9055,36.8452),
+      lat            = c(-1.2921,-1.3051,-0.9965,-1.2341,-1.3102),
+      address        = c("Nairobi CBD","Kilimani","Thika Road","Athi River","Donholm")
     ),
-    coords = c("lon", "lat"), crs = 4326
+    coords = c("lon","lat"), crs = 4326
   ) %>% mutate(anomaly = TRUE)
   
   demo_map <- mapview(
@@ -305,33 +281,46 @@ if (isTRUE(demo_mode)) {
     col.regions = "orange",
     cex = 9,
     layer.name = "DEMO Fake Anomalies",
-    popup = mapview::popupTable(
+    popup = popupTableSafe(
       demo_pts,
-      zcol = c("zone_type","observed_class","allowed_class","address"),
-      feature.id = FALSE
+      zcol = c("zone_type","observed_class","allowed_class","address")
     )
-    
   )
   
   combined_map <- combined_map + demo_map
 }
 
 # ------------------------------------------------------------
-# 11️⃣  OUTPUTS
+# 11) OUTPUTS (HTML + CSV + GPKG)
 # ------------------------------------------------------------
 dir.create("output", showWarnings = FALSE, recursive = TRUE)
 
-mapview::mapshot(combined_map,
-                 file = "output/anomalies_interactive_map.html",
-                 selfcontained = TRUE)
+# ✅ Add searchable map
+combined_map@map <- combined_map@map %>%
+  addSearchFeatures(
+    targetGroups = c("Planning Zones", "Anomalies (2024)", "DEMO Fake Anomalies"),
+    options = searchFeaturesOptions(
+      zoom = 12,
+      openPopup = TRUE,
+      hideMarkerOnCollapse = TRUE
+    )
+  )
 
+# ✅ Save the interactive Leaflet map directly as HTML
+htmlwidgets::saveWidget(
+  widget = combined_map@map,
+  file = "output/anomalies_interactive_map.html",
+  selfcontained = TRUE
+)
+
+# ✅ Planner table export (HTML)
 dt_widget <- datatable(
   planner_table,
   escape = FALSE,
-  extensions = c('Buttons', 'Scroller'),
+  extensions = c('Buttons','Scroller'),
   options = list(
     dom = 'Bfrtip',
-    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    buttons = c('copy','csv','excel','pdf','print'),
     deferRender = TRUE,
     scrollY = 400,
     scroller = TRUE,
@@ -344,31 +333,35 @@ dt_widget <- datatable(
   )
 )
 
-saveWidget(dt_widget,
-           file = "output/anomalies_planner_table.html",
-           selfcontained = TRUE)
+saveWidget(dt_widget, "output/anomalies_planner_table.html", selfcontained = TRUE)
 
-st_write(zonal_sf, "output/land_use_anomalies_full.gpkg",
-         delete_dsn = TRUE, quiet = TRUE)
+# ✅ CSV export
+planner_table_csv <- planner_table %>%
+  mutate(`Google Maps Link` = paste0("https://www.google.com/maps?q=", Latitude, ",", Longitude))
+write.csv(planner_table_csv, "output/anomalies_planner_table.csv", row.names = FALSE)
 
+# ✅ GeoPackages
+st_write(zonal_sf, "output/land_use_anomalies_full.gpkg", delete_dsn = TRUE, quiet = TRUE)
 if (nrow(anomalies_geocoded) > 0) {
-  st_write(anomalies_geocoded,
-           "output/land_use_anomalies_geocoded.gpkg",
+  st_write(anomalies_geocoded, "output/land_use_anomalies_geocoded.gpkg",
            delete_dsn = TRUE, quiet = TRUE)
 } else {
   empty_sf <- st_sf(address = character(), geometry = st_sfc(crs = 4326))
-  st_write(empty_sf,
-           "output/land_use_anomalies_geocoded.gpkg",
+  st_write(empty_sf, "output/land_use_anomalies_geocoded.gpkg",
            delete_dsn = TRUE, quiet = TRUE)
 }
 
 # ------------------------------------------------------------
-# 12️⃣  SUMMARY
+# 12) SUMMARY + AUTO-OPEN
 # ------------------------------------------------------------
 message("\n✅ === PLANNER REPORT READY ===")
 message("Interactive Map      : output/anomalies_interactive_map.html")
 message("Planner Table (HTML) : output/anomalies_planner_table.html")
+message("Planner Table (CSV)  : output/anomalies_planner_table.csv")
 message("Full GeoPackage      : output/land_use_anomalies_full.gpkg")
 message("Anomalies GeoPackage : output/land_use_anomalies_geocoded.gpkg")
 if (isTRUE(demo_mode)) message("Demo Layer           : included (orange points)")
 message("Total REAL anomalies : ", nrow(anomalies_geocoded))
+
+try(browseURL(file.path(getwd(), "output/anomalies_interactive_map.html")), silent = TRUE)
+

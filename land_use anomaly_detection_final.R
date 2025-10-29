@@ -73,7 +73,7 @@ ensure_ee_auth(
 # ------------------------------------------------------------
 # 3 LOAD PLANNING ZONES
 # ------------------------------------------------------------
-zones <- st_read("data/national_plan_zones.gpkg") %>%
+zones <- st_read("data/national_plan_zone.gpkg") %>%
   st_make_valid() %>%
   st_transform(4326)
 
@@ -160,16 +160,49 @@ if (nrow(anomalies_sf) == 0) {
   message("Reverse-geocoding ", nrow(anomalies_sf), " anomalies...")
   if (nrow(anomalies_sf) > 50) message("Heads-up: many points; geocoding may take a while.")
   
+  # anomalies_geocoded <- tryCatch({
+  #   tidygeocoder::reverse_geocode(anomalies_sf,
+  #                                 lat = lat, long = lon,
+  #                                 method = "osm",
+  #                                 address = address,
+  #                                 full_results = FALSE)
+  # }, error = function(e) {
+  #   message("Geocoding failed: ", e$message)
+  #   anomalies_sf %>% mutate(address = NA_character_)
+  # })
+  
+  
   anomalies_geocoded <- tryCatch({
-    tidygeocoder::reverse_geocode(anomalies_sf,
-                                  lat = lat, long = lon,
-                                  method = "osm",
-                                  address = address,
-                                  full_results = FALSE)
+    df <- tidygeocoder::reverse_geocode(
+      anomalies_sf,
+      lat = lat, long = lon,
+      method = "osm",
+      address = address,
+      full_results = FALSE
+    )
+    
+    # Re-attach geometry
+    if (!inherits(df, "sf")) {
+      df <- df %>%
+        sf::st_as_sf(coords = c("lon", "lat"), crs = 4326)
+    }
+    df
   }, error = function(e) {
-    message("Geocoding failed: ", e$message)
+    message("⚠️  Geocoding failed: ", e$message)
     anomalies_sf %>% mutate(address = NA_character_)
   })
+  
+  
+  if (!inherits(anomalies_geocoded, "sf")) {
+    anomalies_geocoded <- sf::st_as_sf(anomalies_geocoded,
+                                       coords = c("lon", "lat"),
+                                       crs = 4326)
+  }
+  
+  
+  
+  
+  
   
   if (!"address" %in% names(anomalies_geocoded))
     anomalies_geocoded$address <- NA_character_
@@ -181,6 +214,48 @@ zonal_sf <- zonal_sf %>%
     anomalies_geocoded %>% st_drop_geometry() %>% select(lon, lat, address),
     by = c("lon", "lat")
   )
+
+
+
+
+# ---------------------------------------------------------
+# SAFE REVERSE GEOCODING BLOCK
+# ---------------------------------------------------------
+anomalies_geocoded <- tryCatch({
+  # Drop geometry before geocoding (tidygeocoder prefers plain data)
+  coords_df <- anomalies_sf %>%
+    st_drop_geometry() %>%
+    select(zone_type, observed_class, allowed_class, lon, lat)
+  
+  # Perform reverse geocoding
+  geocoded_df <- tidygeocoder::reverse_geocode(
+    coords_df,
+    lat = lat,
+    long = lon,
+    method = "osm",
+    address = address,
+    full_results = FALSE
+  )
+  
+  # Ensure lon/lat columns still exist
+  if (!("lon" %in% names(geocoded_df)) || !("lat" %in% names(geocoded_df))) {
+    if (all(c("long", "lat") %in% names(geocoded_df))) {
+      names(geocoded_df)[names(geocoded_df) == "long"] <- "lon"
+    } else {
+      stop("Reverse geocoding output missing lon/lat columns.")
+    }
+  }
+  
+  # Convert back to sf
+  sf::st_as_sf(geocoded_df, coords = c("lon", "lat"), crs = 4326)
+  
+}, error = function(e) {
+  message("⚠️  Geocoding failed: ", e$message)
+  anomalies_sf %>% mutate(address = NA_character_)
+})
+
+
+
 
 # ------------------------------------------------------------
 # 8 PLANNER-FRIENDLY TABLE
