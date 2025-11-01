@@ -4,40 +4,33 @@
 <meta charset="utf-8"/>
 <style>body{background-color:white;}</style>
 
-  <title>Land Use Anomaly Report – 2025</title>
+  <title>Land Use Anomaly Report – Hexagonal Tiles</title>
   <style>
-      body {font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; background: #f8f9fa; color: #333;}
-      h1, h2 {color: #2c3e50; text-align: center;}
-      .section {margin: 30px 0; padding: 20px; background: white; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);}
-      .footer {text-align: center; margin-top: 50px; color: #6c757d; font-size: 0.9em;}
-      iframe {border: 1px solid #ddd; border-radius: 8px;}
+      body {font-family:'Segoe UI',Arial;margin:20px;background:#f8f9fa;}
+      h1,h2{text-align:center;color:#2c3e50;}
+      .section{margin:30px 0;padding:20px;background:white;border-radius:10px;
+               box-shadow:0 2px 8px rgba(0,0,0,0.1);}
+      iframe{border:1px solid #ccc;border-radius:8px;width:100%;}
+      .footer{text-align:center;color:#6c757d;margin:40px 0;}
     </style>
 </head>
 <body>
-<h1>Land Use Anomaly Detection Report – 2025</h1>
+<h1>Land Use Anomaly Detection Report – Hexagonal Grid</h1>
 <div class="section">
   <h2>Interactive Map</h2>
-  <iframe src="anomalies_interactive_map.html" width="100%" height="600" seamless="seamless"></iframe>
+  <iframe src="anomalies_interactive_map.html" height="600"></iframe>
 </div>
 <div class="section">
   <h2>Anomaly Summary by Zone</h2>
-  <iframe src="anomaly_summary_table.html" width="100%" height="250" seamless="seamless"></iframe>
+  <iframe src="anomalies_summary_table.html" height="250"></iframe>
 </div>
 <div class="section">
-  <h2>Top 20 Anomalies (Planner Table)</h2>
-  <iframe src="anomalies_preview_table.html" width="100%" height="450" seamless="seamless"></iframe>
+  <h2>Planner Table</h2>
+  <iframe src="anomalies_planner_table.html" height="450"></iframe>
 </div>
 <div class="footer">
-  <p>
-    Generated on 
-    2025-11-01
-     | Powered by Google Earth Engine + R + OpenStreetMap
-  </p>
-  <p>
-    Total anomaly pixels: 
-    18
-     | DEMO MODE ACTIVE (orange points are fake)
-  </p>
+  <p>Generated on 2025-11-01</p>
+  <p>Detected anomaly hexagons: 60</p>
 </div>
 </body>
 </html>
