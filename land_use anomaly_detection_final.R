@@ -218,41 +218,6 @@ zonal_sf <- zonal_sf %>%
 
 
 
-# ---------------------------------------------------------
-# SAFE REVERSE GEOCODING BLOCK
-# ---------------------------------------------------------
-anomalies_geocoded <- tryCatch({
-  # Drop geometry before geocoding (tidygeocoder prefers plain data)
-  coords_df <- anomalies_sf %>%
-    st_drop_geometry() %>%
-    select(zone_type, observed_class, allowed_class, lon, lat)
-  
-  # Perform reverse geocoding
-  geocoded_df <- tidygeocoder::reverse_geocode(
-    coords_df,
-    lat = lat,
-    long = lon,
-    method = "osm",
-    address = address,
-    full_results = FALSE
-  )
-  
-  # Ensure lon/lat columns still exist
-  if (!("lon" %in% names(geocoded_df)) || !("lat" %in% names(geocoded_df))) {
-    if (all(c("long", "lat") %in% names(geocoded_df))) {
-      names(geocoded_df)[names(geocoded_df) == "long"] <- "lon"
-    } else {
-      stop("Reverse geocoding output missing lon/lat columns.")
-    }
-  }
-  
-  # Convert back to sf
-  sf::st_as_sf(geocoded_df, coords = c("lon", "lat"), crs = 4326)
-  
-}, error = function(e) {
-  message("⚠️  Geocoding failed: ", e$message)
-  anomalies_sf %>% mutate(address = NA_character_)
-})
 
 
 
